@@ -1,0 +1,45 @@
+{
+  "expo": {
+    "name": "PalPay USSD Generator",
+    "slug": "palpay-ussd-generator",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#E91E8C"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTabletMode": true,
+      "bundleIdentifier": "com.ibrahimmeqbel.palpayussd"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#E91E8C"
+      },
+      "package": "com.ibrahimmeqbel.palpayussd",
+      "versionCode": 1,
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "description": "أسرع وأسهل طريقة لتوليد أكواد التحويل الموحدة - يعمل بدون إنترنت",
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
+    "plugins": []
+  }
+}
