@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -11,19 +11,49 @@ import {
   Alert,
   StatusBar,
   SafeAreaView,
+  FlatList,
+  Modal,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import * as Notifications from 'expo-notifications';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const PALPAY_COLORS = {
   primary: '#E91E8C',
   secondary: '#9C27B0',
   accent: '#FF9500',
+  jawwal: '#00A3E0',
   background: '#FFFFFF',
   text: '#1A1A1A',
   lightGray: '#F5F5F5',
   border: '#E0E0E0',
   success: '#4CAF50',
+  warning: '#FF9800',
+  error: '#F44336',
 };
+
+const WALLETS = {
+  palpay: {
+    name: 'PalPay',
+    code: '*370*1*1*',
+    color: PALPAY_COLORS.primary,
+    icon: 'wallet',
+  },
+  jawwal: {
+    name: 'Jawwal Pay',
+    code: '*268*1*',
+    color: PALPAY_COLORS.jawwal,
+    icon: 'phone-in-talk',
+  },
+};
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+  }),
+});
 
 export default function App() {
   const [phoneNumber, setPhoneNumber] = useState('');
@@ -32,6 +62,112 @@ export default function App() {
   const [phoneError, setPhoneError] = useState('');
   const [amountError, setAmountError] = useState('');
   const [isCopied, setIsCopied] = useState(false);
+  const [selectedWallet, setSelectedWallet] = useState('palpay');
+  const [transactions, setTransactions] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
+
+  useEffect(() => {
+    loadTransactions();
+    setupNotifications();
+  }, []);
+
+  const setupNotifications = async () => {
+    const { status } = await Notifications.requestPermissionsAsync();
+    if (status !== 'granted') return;
+
+    Notifications.addNotificationReceivedListener((notification) => {
+      handleIncomingNotification(notification);
+    });
+  };
+
+  const handleIncomingNotification = async (notification) => {
+    const { body, title } = notification.request.content;
+    const notificationText = `${title || ''} ${body || ''}`.toLowerCase();
+
+    if (
+      notificationText.includes('jawwal') ||
+      notificationText.includes('268') ||
+      notificationText.includes('تحويل') ||
+      notificationText.includes('transfer')
+    ) {
+      const amountMatch = notificationText.match(/(\d+(?:\.\d{1,2})?)/);
+      const phoneMatch = notificationText.match(/(\d{7,15})/);
+
+      if (amountMatch || phoneMatch) {
+        const extractedAmount = amountMatch ? amountMatch[1] : '0';
+        const extractedPhone = phoneMatch ? phoneMatch[1] : '';
+
+        await addTransaction({
+          phone: extractedPhone,
+          amount: extractedAmount,
+          wallet: 'jawwal',
+          source: 'notification',
+          notificationText: body,
+        });
+
+        Alert.alert(
+          '✓ تم تسجيل المعاملة',
+          `تم تسجيل تحويل من جوال باي\nالمبلغ: ${extractedAmount}\nالرقم: ${extractedPhone}`,
+          [{ text: 'حسناً' }]
+        );
+      }
+    }
+  };
+
+  const loadTransactions = async () => {
+    try {
+      const stored = await AsyncStorage.getItem('transactions');
+      if (stored) {
+        setTransactions(JSON.parse(stored));
+      }
+    } catch (error) {
+      console.error('خطأ في تحميل السجل:', error);
+    }
+  };
+
+  const saveTransactions = async (newTransactions) => {
+    try {
+      await AsyncStorage.setItem('transactions', JSON.stringify(newTransactions));
+    } catch (error) {
+      console.error('خطأ في حفظ السجل:', error);
+    }
+  };
+
+  const addTransaction = async (transaction) => {
+    const newTransaction = {
+      id: Date.now().toString(),
+      ...transaction,
+      timestamp: new Date().toISOString(),
+    };
+
+    const updated = [newTransaction, ...transactions];
+    setTransactions(updated);
+    await saveTransactions(updated);
+  };
+
+  const deleteTransaction = async (id) => {
+    const updated = transactions.filter((t) => t.id !== id);
+    setTransactions(updated);
+    await saveTransactions(updated);
+  };
+
+  const clearHistory = () => {
+    Alert.alert(
+      'تأكيد',
+      'هل تريد حذف جميع المعاملات؟',
+      [
+        { text: 'إلغاء', style: 'cancel' },
+        {
+          text: 'حذف',
+          style: 'destructive',
+          onPress: async () => {
+            setTransactions([]);
+            await saveTransactions([]);
+          },
+        },
+      ]
+    );
+  };
 
   const validatePhone = (phone) => {
     if (!phone) return '';
@@ -64,7 +200,8 @@ export default function App() {
     setAmountError(amountErr);
 
     if (!phoneErr && !amountErr && phoneNumber && amount) {
-      const code = `*370*1*1*${phoneNumber}*${amount}#`;
+      const wallet = WALLETS[selectedWallet];
+      const code = `${wallet.code}${phoneNumber}*${amount}#`;
       setGeneratedCode(code);
     } else {
       setGeneratedCode('');
@@ -84,8 +221,8 @@ export default function App() {
     if (generatedCode) {
       try {
         await Share.share({
-          message: `كود التحويل: ${generatedCode}\n\nتم توليده باستخدام PalPay USSD Generator`,
-          title: 'PalPay USSD Code',
+          message: `كود التحويل: ${generatedCode}`,
+          title: 'USSD Code',
         });
       } catch (error) {
         Alert.alert('خطأ', 'حدث خطأ أثناء المشاركة');
@@ -93,28 +230,101 @@ export default function App() {
     }
   };
 
+  const recordTransaction = async () => {
+    if (!phoneNumber || !amount) {
+      Alert.alert('خطأ', 'يرجى إدخال رقم الهاتف والمبلغ');
+      return;
+    }
+
+    const phoneErr = validatePhone(phoneNumber);
+    const amountErr = validateAmount(amount);
+
+    if (phoneErr || amountErr) {
+      Alert.alert('خطأ', 'يرجى التحقق من البيانات المدخلة');
+      return;
+    }
+
+    await addTransaction({
+      phone: phoneNumber,
+      amount: amount,
+      wallet: selectedWallet,
+      code: generatedCode,
+      source: 'manual',
+    });
+
+    Alert.alert('نجح', 'تم تسجيل المعاملة بنجاح');
+    setPhoneNumber('');
+    setAmount('');
+    setGeneratedCode('');
+  };
+
   React.useEffect(() => {
     generateCode();
-  }, [phoneNumber, amount]);
+  }, [phoneNumber, amount, selectedWallet]);
 
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor={PALPAY_COLORS.primary} />
-      
+
       <ScrollView contentContainerStyle={styles.scrollContent}>
         {/* Header */}
         <View style={styles.header}>
-          <View style={styles.logoContainer}>
-            <MaterialCommunityIcons
-              name="lightning-bolt"
-              size={40}
-              color={PALPAY_COLORS.primary}
-            />
+          <View style={styles.headerTop}>
+            <View style={styles.logoContainer}>
+              <MaterialCommunityIcons
+                name="lightning-bolt"
+                size={40}
+                color={PALPAY_COLORS.background}
+              />
+            </View>
+            <TouchableOpacity
+              style={styles.historyButton}
+              onPress={() => setShowHistory(true)}
+            >
+              <MaterialCommunityIcons
+                name="history"
+                size={24}
+                color={PALPAY_COLORS.background}
+              />
+              {transactions.length > 0 && (
+                <View style={styles.badge}>
+                  <Text style={styles.badgeText}>
+                    {transactions.length > 99 ? '99+' : transactions.length}
+                  </Text>
+                </View>
+              )}
+            </TouchableOpacity>
           </View>
-          <Text style={styles.title}>PalPay USSD Generator</Text>
-          <Text style={styles.subtitle}>
-            أسرع وأسهل طريقة لتوليد أكواد التحويل الموحدة
-          </Text>
+          <Text style={styles.title}>USSD Generator</Text>
+          <Text style={styles.subtitle}>توليد أكواد التحويل الموحدة</Text>
+        </View>
+
+        {/* Wallet Selector */}
+        <View style={styles.walletSelector}>
+          {Object.entries(WALLETS).map(([key, wallet]) => (
+            <TouchableOpacity
+              key={key}
+              style={[
+                styles.walletButton,
+                selectedWallet === key && styles.walletButtonActive,
+              ]}
+              onPress={() => setSelectedWallet(key)}
+            >
+              <MaterialCommunityIcons
+                name={wallet.icon}
+                size={20}
+                color={selectedWallet === key ? PALPAY_COLORS.background : wallet.color}
+              />
+              <Text
+                style={[
+                  styles.walletButtonText,
+                  selectedWallet === key && styles.walletButtonTextActive,
+                ]}
+              >
+                {wallet.name}
+              </Text>
+            </TouchableOpacity>
+          ))}
         </View>
 
         {/* Main Card */}
@@ -123,21 +333,17 @@ export default function App() {
           <View style={styles.section}>
             <Text style={styles.label}>رقم المستقبل</Text>
             <TextInput
-              style={[
-                styles.input,
-                phoneError ? styles.inputError : null,
-              ]}
+              style={[styles.input, phoneError ? styles.inputError : null]}
               placeholder="مثال: 201001234567"
               placeholderTextColor="#999"
               keyboardType="phone-pad"
               value={phoneNumber}
               onChangeText={setPhoneNumber}
-              editable={true}
             />
             {phoneError ? (
               <Text style={styles.errorText}>{phoneError}</Text>
             ) : (
-              <Text style={styles.helperText}>أدخل رقم الهاتف الكامل (7-15 رقم)</Text>
+              <Text style={styles.helperText}>أدخل رقم الهاتف الكامل</Text>
             )}
           </View>
 
@@ -145,16 +351,12 @@ export default function App() {
           <View style={[styles.section, { marginTop: 20 }]}>
             <Text style={styles.label}>المبلغ</Text>
             <TextInput
-              style={[
-                styles.input,
-                amountError ? styles.inputError : null,
-              ]}
+              style={[styles.input, amountError ? styles.inputError : null]}
               placeholder="مثال: 100"
               placeholderTextColor="#999"
               keyboardType="decimal-pad"
               value={amount}
               onChangeText={setAmount}
-              editable={true}
             />
             {amountError ? (
               <Text style={styles.errorText}>{amountError}</Text>
@@ -176,10 +378,7 @@ export default function App() {
               </View>
 
               <View style={styles.codeContainer}>
-                <Text
-                  style={styles.codeText}
-                  selectable={true}
-                >
+                <Text style={styles.codeText} selectable={true}>
                   {generatedCode}
                 </Text>
                 <TouchableOpacity onPress={copyCode}>
@@ -196,307 +395,165 @@ export default function App() {
           {/* Action Buttons */}
           <View style={styles.buttonContainer}>
             <TouchableOpacity
-              style={[
-                styles.button,
-                styles.primaryButton,
-                !generatedCode && styles.disabledButton,
-              ]}
+              style={[styles.button, styles.primaryButton, !generatedCode && styles.disabledButton]}
               onPress={copyCode}
               disabled={!generatedCode}
             >
-              <MaterialCommunityIcons
-                name="content-copy"
-                size={20}
-                color="#FFF"
-              />
-              <Text style={styles.buttonText}>نسخ الكود</Text>
+              <MaterialCommunityIcons name="content-copy" size={20} color="#FFF" />
+              <Text style={styles.buttonText}>نسخ</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={[
-                styles.button,
-                styles.secondaryButton,
-                !generatedCode && styles.disabledButton,
-              ]}
+              style={[styles.button, styles.secondaryButton, !generatedCode && styles.disabledButton]}
               onPress={shareCode}
               disabled={!generatedCode}
             >
-              <MaterialCommunityIcons
-                name="share-variant"
-                size={20}
-                color="#FFF"
-              />
+              <MaterialCommunityIcons name="share-variant" size={20} color="#FFF" />
               <Text style={styles.buttonText}>مشاركة</Text>
             </TouchableOpacity>
           </View>
-        </View>
 
-        {/* Features Section */}
-        <View style={styles.featuresSection}>
-          <Text style={styles.featuresTitle}>مميزات التطبيق</Text>
-
-          <FeatureCard
-            icon="lightning-bolt"
-            title="تحويل سريع"
-            description="توليد أكواد USSD في ثوانٍ معدودة"
-          />
-
-          <FeatureCard
-            icon="cloud-off"
-            title="بدون إنترنت"
-            description="التطبيق يعمل بشكل كامل بدون اتصال إنترنت"
-          />
-
-          <FeatureCard
-            icon="touch"
-            title="سهل الاستخدام"
-            description="واجهة بسيطة وسهلة لا تتطلب أي خبرة تقنية"
-          />
+          {/* Record Transaction Button */}
+          <TouchableOpacity
+            style={[styles.button, styles.recordButton, (!phoneNumber || !amount) && styles.disabledButton]}
+            onPress={recordTransaction}
+            disabled={!phoneNumber || !amount}
+          >
+            <MaterialCommunityIcons name="plus-circle" size={20} color="#FFF" />
+            <Text style={styles.buttonText}>تسجيل المعاملة</Text>
+          </TouchableOpacity>
         </View>
 
         {/* Footer */}
         <View style={styles.footer}>
-          <Text style={styles.footerText}>
-            © 2026 PalPay USSD Generator
-          </Text>
-          <Text style={styles.footerText}>
-            تم تطويره بواسطة Eng: Ibrahim Meqbel
-          </Text>
+          <Text style={styles.footerText}>© 2026 USSD Generator</Text>
         </View>
       </ScrollView>
+
+      {/* History Modal */}
+      <Modal
+        visible={showHistory}
+        animationType="slide"
+        transparent={false}
+        onRequestClose={() => setShowHistory(false)}
+      >
+        <SafeAreaView style={styles.container}>
+          <View style={styles.modalHeader}>
+            <TouchableOpacity onPress={() => setShowHistory(false)}>
+              <MaterialCommunityIcons name="close" size={28} color={PALPAY_COLORS.text} />
+            </TouchableOpacity>
+            <Text style={styles.modalTitle}>سجل الحركات</Text>
+            <TouchableOpacity onPress={clearHistory}>
+              <MaterialCommunityIcons name="delete-sweep" size={28} color={PALPAY_COLORS.error} />
+            </TouchableOpacity>
+          </View>
+
+          {transactions.length === 0 ? (
+            <View style={styles.emptyState}>
+              <MaterialCommunityIcons name="history" size={64} color={PALPAY_COLORS.lightGray} />
+              <Text style={styles.emptyStateText}>لا توجد معاملات مسجلة</Text>
+            </View>
+          ) : (
+            <FlatList
+              data={transactions}
+              keyExtractor={(item) => item.id}
+              renderItem={({ item }) => (
+                <TransactionItem transaction={item} onDelete={() => deleteTransaction(item.id)} />
+              )}
+              contentContainerStyle={styles.transactionList}
+            />
+          )}
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 }
 
-function FeatureCard({ icon, title, description }) {
+function TransactionItem({ transaction, onDelete }) {
+  const wallet = WALLETS[transaction.wallet];
+  const isAutomatic = transaction.source === 'notification';
+
   return (
-    <View style={styles.featureCard}>
-      <View style={styles.featureIconContainer}>
-        <MaterialCommunityIcons
-          name={icon}
-          size={24}
-          color={PALPAY_COLORS.primary}
-        />
+    <View style={styles.transactionItem}>
+      <View style={styles.transactionLeft}>
+        <View style={[styles.transactionIcon, { backgroundColor: wallet.color + '20' }]}>
+          <MaterialCommunityIcons name={wallet.icon} size={24} color={wallet.color} />
+        </View>
+        <View style={styles.transactionInfo}>
+          <Text style={styles.transactionWallet}>{wallet.name}</Text>
+          <Text style={styles.transactionPhone}>{transaction.phone}</Text>
+          <Text style={styles.transactionTime}>
+            {new Date(transaction.timestamp).toLocaleString('ar-SA')}
+          </Text>
+          {isAutomatic && (
+            <View style={styles.automaticBadge}>
+              <MaterialCommunityIcons name="bell" size={12} color={PALPAY_COLORS.warning} />
+              <Text style={styles.automaticBadgeText}>تسجيل تلقائي</Text>
+            </View>
+          )}
+        </View>
       </View>
-      <View style={styles.featureContent}>
-        <Text style={styles.featureTitle}>{title}</Text>
-        <Text style={styles.featureDescription}>{description}</Text>
+      <View style={styles.transactionRight}>
+        <Text style={styles.transactionAmount}>{transaction.amount}</Text>
+        <TouchableOpacity onPress={onDelete}>
+          <MaterialCommunityIcons name="delete" size={20} color={PALPAY_COLORS.error} />
+        </TouchableOpacity>
       </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: PALPAY_COLORS.background,
-  },
-  scrollContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 20,
-  },
-  header: {
-    alignItems: 'center',
-    paddingVertical: 30,
-    paddingHorizontal: 16,
-    borderRadius: 16,
-    marginTop: 16,
-    marginBottom: 24,
-    background: `linear-gradient(135deg, ${PALPAY_COLORS.primary}, ${PALPAY_COLORS.secondary}, ${PALPAY_COLORS.accent})`,
-  },
-  logoContainer: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: PALPAY_COLORS.background,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 8,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: PALPAY_COLORS.background,
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  subtitle: {
-    fontSize: 14,
-    color: PALPAY_COLORS.background,
-    textAlign: 'center',
-    opacity: 0.9,
-  },
-  card: {
-    backgroundColor: PALPAY_COLORS.background,
-    borderRadius: 16,
-    padding: 24,
-    marginBottom: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 5,
-  },
-  section: {
-    marginBottom: 16,
-  },
-  label: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: PALPAY_COLORS.text,
-    marginBottom: 8,
-    textAlign: 'right',
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: PALPAY_COLORS.border,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    fontSize: 16,
-    color: PALPAY_COLORS.text,
-    textAlign: 'right',
-  },
-  inputError: {
-    borderColor: '#F44336',
-  },
-  errorText: {
-    color: '#F44336',
-    fontSize: 12,
-    marginTop: 4,
-    textAlign: 'right',
-  },
-  helperText: {
-    color: '#999',
-    fontSize: 12,
-    marginTop: 4,
-    textAlign: 'right',
-  },
-  codeSection: {
-    marginTop: 24,
-    paddingTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: PALPAY_COLORS.border,
-  },
-  successHeader: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  successText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: PALPAY_COLORS.text,
-    marginRight: 8,
-  },
-  codeContainer: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    backgroundColor: PALPAY_COLORS.lightGray,
-    borderWidth: 1,
-    borderColor: PALPAY_COLORS.border,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-  },
-  codeText: {
-    flex: 1,
-    fontSize: 14,
-    fontWeight: '600',
-    fontFamily: 'Courier New',
-    color: PALPAY_COLORS.text,
-    textAlign: 'right',
-  },
-  buttonContainer: {
-    flexDirection: 'row-reverse',
-    gap: 12,
-    marginTop: 24,
-  },
-  button: {
-    flex: 1,
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    borderRadius: 8,
-    gap: 8,
-  },
-  primaryButton: {
-    backgroundColor: PALPAY_COLORS.primary,
-  },
-  secondaryButton: {
-    backgroundColor: PALPAY_COLORS.accent,
-  },
-  disabledButton: {
-    opacity: 0.5,
-  },
-  buttonText: {
-    color: '#FFF',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  featuresSection: {
-    marginBottom: 24,
-  },
-  featuresTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: PALPAY_COLORS.text,
-    marginBottom: 16,
-    textAlign: 'right',
-  },
-  featureCard: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    backgroundColor: PALPAY_COLORS.background,
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  featureIconContainer: {
-    width: 48,
-    height: 48,
-    borderRadius: 8,
-    backgroundColor: `${PALPAY_COLORS.primary}15`,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginLeft: 16,
-  },
-  featureContent: {
-    flex: 1,
-  },
-  featureTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: PALPAY_COLORS.text,
-    marginBottom: 4,
-    textAlign: 'right',
-  },
-  featureDescription: {
-    fontSize: 12,
-    color: '#666',
-    textAlign: 'right',
-  },
-  footer: {
-    alignItems: 'center',
-    paddingVertical: 16,
-    borderTopWidth: 1,
-    borderTopColor: PALPAY_COLORS.border,
-  },
-  footerText: {
-    fontSize: 12,
-    color: '#999',
-    textAlign: 'center',
-    marginVertical: 4,
-  },
+  container: { flex: 1, backgroundColor: PALPAY_COLORS.background },
+  scrollContent: { paddingHorizontal: 16, paddingBottom: 20 },
+  header: { paddingVertical: 24, paddingHorizontal: 16, borderRadius: 16, marginTop: 16, marginBottom: 16, backgroundColor: PALPAY_COLORS.primary },
+  headerTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  logoContainer: { width: 56, height: 56, borderRadius: 28, backgroundColor: PALPAY_COLORS.background, justifyContent: 'center', alignItems: 'center', elevation: 8 },
+  historyButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: PALPAY_COLORS.secondary, justifyContent: 'center', alignItems: 'center', position: 'relative' },
+  badge: { position: 'absolute', top: -8, right: -8, backgroundColor: PALPAY_COLORS.error, borderRadius: 12, width: 24, height: 24, justifyContent: 'center', alignItems: 'center' },
+  badgeText: { color: PALPAY_COLORS.background, fontSize: 12, fontWeight: 'bold' },
+  title: { fontSize: 24, fontWeight: 'bold', color: PALPAY_COLORS.background, marginBottom: 8, textAlign: 'center' },
+  subtitle: { fontSize: 14, color: PALPAY_COLORS.background, textAlign: 'center', opacity: 0.9 },
+  walletSelector: { flexDirection: 'row', marginBottom: 16, gap: 12 },
+  walletButton: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 12, paddingHorizontal: 16, borderRadius: 12, backgroundColor: PALPAY_COLORS.lightGray, borderWidth: 2, borderColor: 'transparent', gap: 8 },
+  walletButtonActive: { backgroundColor: PALPAY_COLORS.primary, borderColor: PALPAY_COLORS.primary },
+  walletButtonText: { fontSize: 14, fontWeight: '600', color: PALPAY_COLORS.text },
+  walletButtonTextActive: { color: PALPAY_COLORS.background },
+  card: { backgroundColor: PALPAY_COLORS.background, borderRadius: 16, padding: 20, marginBottom: 24, elevation: 5 },
+  section: { marginBottom: 16 },
+  label: { fontSize: 16, fontWeight: '600', color: PALPAY_COLORS.text, marginBottom: 8 },
+  input: { borderWidth: 1, borderColor: PALPAY_COLORS.border, borderRadius: 12, paddingHorizontal: 16, paddingVertical: 12, fontSize: 16, color: PALPAY_COLORS.text, backgroundColor: PALPAY_COLORS.lightGray },
+  inputError: { borderColor: PALPAY_COLORS.error, backgroundColor: PALPAY_COLORS.error + '10' },
+  errorText: { color: PALPAY_COLORS.error, fontSize: 12, marginTop: 4 },
+  helperText: { color: '#999', fontSize: 12, marginTop: 4 },
+  codeSection: { marginTop: 20, paddingTop: 20, borderTopWidth: 1, borderTopColor: PALPAY_COLORS.border },
+  successHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 12, gap: 8 },
+  successText: { fontSize: 14, fontWeight: '600', color: PALPAY_COLORS.success },
+  codeContainer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, backgroundColor: PALPAY_COLORS.lightGray, borderRadius: 12, borderWidth: 1, borderColor: PALPAY_COLORS.border },
+  codeText: { fontSize: 16, fontWeight: 'bold', color: PALPAY_COLORS.text, flex: 1 },
+  buttonContainer: { flexDirection: 'row', gap: 12, marginTop: 20 },
+  button: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 12, borderRadius: 12, gap: 8 },
+  primaryButton: { backgroundColor: PALPAY_COLORS.primary },
+  secondaryButton: { backgroundColor: PALPAY_COLORS.secondary },
+  recordButton: { backgroundColor: PALPAY_COLORS.success, marginTop: 12 },
+  disabledButton: { opacity: 0.5 },
+  buttonText: { color: PALPAY_COLORS.background, fontSize: 14, fontWeight: '600' },
+  footer: { alignItems: 'center', paddingVertical: 20, borderTopWidth: 1, borderTopColor: PALPAY_COLORS.border },
+  footerText: { fontSize: 12, color: '#999', marginVertical: 4 },
+  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: PALPAY_COLORS.border },
+  modalTitle: { fontSize: 18, fontWeight: 'bold', color: PALPAY_COLORS.text },
+  emptyState: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 16 },
+  emptyStateText: { fontSize: 16, color: '#999' },
+  transactionList: { paddingHorizontal: 16, paddingVertical: 12 },
+  transactionItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 12, backgroundColor: PALPAY_COLORS.lightGray, borderRadius: 12, marginBottom: 12 },
+  transactionLeft: { flexDirection: 'row', alignItems: 'center', flex: 1, gap: 12 },
+  transactionIcon: { width: 48, height: 48, borderRadius: 24, justifyContent: 'center', alignItems: 'center' },
+  transactionInfo: { flex: 1 },
+  transactionWallet: { fontSize: 14, fontWeight: '600', color: PALPAY_COLORS.text },
+  transactionPhone: { fontSize: 12, color: '#666', marginTop: 2 },
+  transactionTime: { fontSize: 11, color: '#999', marginTop: 2 },
+  automaticBadge: { flexDirection: 'row', alignItems: 'center', marginTop: 6, gap: 4, paddingHorizontal: 8, paddingVertical: 4, backgroundColor: PALPAY_COLORS.warning + '20', borderRadius: 6, alignSelf: 'flex-start' },
+  automaticBadgeText: { fontSize: 10, color: PALPAY_COLORS.warning, fontWeight: '600' },
+  transactionRight: { alignItems: 'flex-end', gap: 8 },
+  transactionAmount: { fontSize: 14, fontWeight: 'bold', color: PALPAY_COLORS.primary },
 });
